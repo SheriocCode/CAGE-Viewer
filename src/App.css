@@ -284,7 +284,7 @@ select:focus-visible {
   position: absolute;
   top: 48px;
   left: 12px;
-  z-index: 2;
+  z-index: 5;
   color: var(--gd-text-soft);
   background: rgba(8, 9, 10, 0.78);
   border: 1px solid var(--gd-line);
@@ -298,12 +298,12 @@ select:focus-visible {
   position: absolute;
   top: 50px;
   right: 12px;
-  z-index: 4;
+  z-index: 5;
   width: 56px;
   height: 56px;
   border-radius: var(--gd-radius-md);
-  background: rgba(8, 9, 10, 0.78);
-  border: 1px solid var(--gd-line-strong);
+  background: transparent;
+  border: 0;
   display: grid;
   place-items: center;
 }
@@ -391,6 +391,150 @@ select:focus-visible {
   width: 100% !important;
   height: 100% !important;
   display: block;
+}
+
+.coordinate-rulers {
+  position: absolute;
+  inset: 38px 0 0;
+  z-index: 3;
+  pointer-events: none;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: rgba(241, 243, 238, 0.82);
+}
+
+.coordinate-ruler {
+  position: absolute;
+  overflow: visible;
+}
+
+.coordinate-ruler[hidden] {
+  display: none;
+}
+
+.ruler-bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0;
+}
+
+.ruler-left {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+}
+
+.ruler-right {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+}
+
+.ruler-axis {
+  position: absolute;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--gd-radius-sm);
+  background: rgba(15, 17, 19, 0.88);
+  color: var(--gd-accent);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.ruler-bottom .ruler-axis {
+  left: 7px;
+  top: -28px;
+}
+
+.ruler-left .ruler-axis,
+.ruler-right .ruler-axis {
+  left: 10px;
+  top: 7px;
+}
+
+.ruler-right .ruler-axis {
+  left: -28px;
+}
+
+.ruler-tick {
+  position: absolute;
+  color: rgba(241, 243, 238, 0.7);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ruler-tick i {
+  position: absolute;
+  display: block;
+  background: rgba(241, 243, 238, 0.56);
+}
+
+.ruler-tick b {
+  font-weight: 500;
+}
+
+.ruler-bottom .ruler-tick {
+  top: 0;
+  transform: translateX(-50%);
+}
+
+.ruler-bottom .ruler-tick i {
+  left: 50%;
+  top: -9px;
+  width: 1px;
+  height: 9px;
+}
+
+.ruler-bottom .ruler-tick b {
+  position: absolute;
+  left: 50%;
+  top: -23px;
+  transform: translateX(-50%);
+}
+
+.ruler-left .ruler-tick,
+.ruler-right .ruler-tick {
+  left: 0;
+  width: 0;
+  transform: translateY(-50%);
+}
+
+.ruler-left .ruler-tick i,
+.ruler-right .ruler-tick i {
+  top: 50%;
+  width: 9px;
+  height: 1px;
+}
+
+.ruler-left .ruler-tick i {
+  left: 0;
+}
+
+.ruler-right .ruler-tick i {
+  right: 0;
+}
+
+.ruler-left .ruler-tick b,
+.ruler-right .ruler-tick b {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%) rotate(-90deg);
+  transform-origin: center;
+}
+
+.ruler-left .ruler-tick b {
+  left: 12px;
+}
+
+.ruler-right .ruler-tick b {
+  right: 12px;
 }
 
 .measurement-toolbar {

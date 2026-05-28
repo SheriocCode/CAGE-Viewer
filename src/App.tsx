@@ -115,6 +115,20 @@ type ScreenPoint = {
   y: number;
 };
 
+type RulerAxis = "x" | "y" | "z";
+
+type RulerSide = "left" | "bottom" | "right";
+
+type RulerRefs = Record<RulerSide, HTMLDivElement | null>;
+
+type DynamicGridSignature = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  step: number;
+};
+
 type RectDraft = {
   start: ScreenPoint;
   current: ScreenPoint;
@@ -135,6 +149,32 @@ const formatMeasure = (value: number, unit: "u" | "u²" | "°") => `${value.toFi
 const pointToVector = ([x, y, z]: MeasurementPoint) => new THREE.Vector3(x, y, z);
 
 const vectorToPoint = (value: THREE.Vector3): MeasurementPoint => [value.x, value.y, value.z];
+
+const AXIS_LABELS: Record<RulerAxis, string> = { x: "X", y: "Y", z: "Z" };
+
+const RULER_MAX_TICKS = 16;
+
+const chooseNiceStep = (range: number, targetTicks = 8) => {
+  if (!Number.isFinite(range) || range <= 0) return 1;
+  const rough = range / targetTicks;
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const normalized = rough / magnitude;
+  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return nice * magnitude;
+};
+
+const formatRulerValue = (value: number, step: number) => {
+  const decimals = Math.max(0, Math.min(4, Math.ceil(-Math.log10(step)) + 1));
+  const normalized = Math.abs(value) < step * 0.0001 ? 0 : value;
+  return normalized.toFixed(decimals);
+};
+
+const expandRange = (min: number, max: number, padRatio = 0.08) => {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: -10, max: 10 };
+  if (min === max) return { min: min - 1, max: max + 1 };
+  const pad = Math.max((max - min) * padRatio, 0.5);
+  return { min: min - pad, max: max + pad };
+};
 
 const MEASUREMENT_AXIS_VECTORS: Record<MeasurementAxis, THREE.Vector3> = {
   x: new THREE.Vector3(1, 0, 0),
@@ -730,8 +770,12 @@ function App() {
   const edlPassRef = useRef<EDLPass | null>(null);
 
   const pointCloudRef = useRef<THREE.Points | null>(null);
-  const gridRef = useRef<THREE.GridHelper | null>(null);
+  const gridRef = useRef<THREE.LineSegments | null>(null);
+  const gridSignatureRef = useRef<string>("");
+  const showGridRef = useRef(true);
   const axesRef = useRef<THREE.AxesHelper | null>(null);
+  const rulerRefs = useRef<RulerRefs>({ left: null, bottom: null, right: null });
+  const rulerSignatureRef = useRef("");
   const gizmoAxisRefs = useRef<{ x: HTMLDivElement | null; y: HTMLDivElement | null; z: HTMLDivElement | null }>({
     x: null,
     y: null,
@@ -799,6 +843,292 @@ function App() {
     annotationActions: false,
   });
 
+  const getReferenceBox = () => {
+    const box = boundingBoxRef.current;
+    if (box && !box.isEmpty()) return box.clone();
+    return new THREE.Box3(new THREE.Vector3(-10, -10, 0), new THREE.Vector3(10, 10, 3));
+  };
+
+  const intersectViewportWithZPlane = (camera: THREE.Camera, mount: HTMLDivElement, planeZ: number) => {
+    const corners = [
+      new THREE.Vector2(-1, -1),
+      new THREE.Vector2(1, -1),
+      new THREE.Vector2(-1, 1),
+      new THREE.Vector2(1, 1),
+    ];
+    const points: THREE.Vector3[] = [];
+
+    corners.forEach((corner) => {
+      const nearPoint = new THREE.Vector3(corner.x, corner.y, -1).unproject(camera);
+      const farPoint = new THREE.Vector3(corner.x, corner.y, 1).unproject(camera);
+      const direction = farPoint.clone().sub(nearPoint).normalize();
+      const origin = (camera as THREE.PerspectiveCamera).isPerspectiveCamera ? camera.position.clone() : nearPoint;
+      if (Math.abs(direction.z) < 0.0001) return;
+      const distance = (planeZ - origin.z) / direction.z;
+      if (!Number.isFinite(distance)) return;
+      points.push(origin.add(direction.multiplyScalar(distance)));
+    });
+
+    if (points.length < 2) return null;
+    const xs = points.map((point) => point.x);
+    const ys = points.map((point) => point.y);
+    const width = Math.max(1, mount.clientWidth);
+    const height = Math.max(1, mount.clientHeight);
+    const viewportPad = Math.max(width, height) / Math.min(width, height);
+    return {
+      x: expandRange(Math.min(...xs), Math.max(...xs), 0.05 * viewportPad),
+      y: expandRange(Math.min(...ys), Math.max(...ys), 0.05 * viewportPad),
+    };
+  };
+
+  const getVisibleGridRange = (): DynamicGridSignature | null => {
+    const camera = activeCameraRef.current;
+    const mount = mountRef.current;
+    if (!camera || !mount) return null;
+
+    const box = getReferenceBox();
+    const gridZ = box.min.z;
+    const planeRange = intersectViewportWithZPlane(camera, mount, gridZ);
+    const boxX = expandRange(box.min.x, box.max.x, 0.18);
+    const boxY = expandRange(box.min.y, box.max.y, 0.18);
+    const x = planeRange?.x ?? boxX;
+    const y = planeRange?.y ?? boxY;
+
+    const minX = Math.min(x.min, boxX.min);
+    const maxX = Math.max(x.max, boxX.max);
+    const minY = Math.min(y.min, boxY.min);
+    const maxY = Math.max(y.max, boxY.max);
+    const step = chooseNiceStep(Math.max(maxX - minX, maxY - minY), 14);
+
+    return {
+      minX: Math.floor(minX / step) * step,
+      maxX: Math.ceil(maxX / step) * step,
+      minY: Math.floor(minY / step) * step,
+      maxY: Math.ceil(maxY / step) * step,
+      step,
+    };
+  };
+
+  const updateDynamicGrid = () => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const range = getVisibleGridRange();
+    if (!range) return;
+
+    const signature = [range.minX, range.maxX, range.minY, range.maxY, range.step].map((value) => value.toFixed(3)).join("|");
+    if (gridSignatureRef.current === signature) {
+      if (gridRef.current) gridRef.current.visible = showGridRef.current;
+      return;
+    }
+
+    if (gridRef.current) {
+      scene.remove(gridRef.current);
+      gridRef.current.geometry.dispose();
+      (gridRef.current.material as THREE.Material).dispose();
+    }
+
+    const z = getReferenceBox().min.z;
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const minor = new THREE.Color(0xf5f5f5);
+    const major = new THREE.Color(0xebebeb);
+    const pushLine = (a: THREE.Vector3, b: THREE.Vector3, color: THREE.Color) => {
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
+    };
+
+    let index = 0;
+    for (let x = range.minX; x <= range.maxX + range.step * 0.5; x += range.step) {
+      pushLine(new THREE.Vector3(x, range.minY, z), new THREE.Vector3(x, range.maxY, z), index % 5 === 0 ? major : minor);
+      index += 1;
+    }
+    index = 0;
+    for (let y = range.minY; y <= range.maxY + range.step * 0.5; y += range.step) {
+      pushLine(new THREE.Vector3(range.minX, y, z), new THREE.Vector3(range.maxX, y, z), index % 5 === 0 ? major : minor);
+      index += 1;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    const material = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.72, depthWrite: false });
+    const grid = new THREE.LineSegments(geometry, material);
+    grid.visible = showGridRef.current;
+    gridRef.current = grid;
+    gridSignatureRef.current = signature;
+    scene.add(grid);
+  };
+
+  const getScreenAxis = (axis: RulerAxis) => {
+    const camera = activeCameraRef.current;
+    const box = getReferenceBox();
+    if (!camera) return new THREE.Vector2(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = Math.max(1, box.getSize(new THREE.Vector3()).length() * 0.08);
+    const direction =
+      axis === "x" ? new THREE.Vector3(size, 0, 0) : axis === "y" ? new THREE.Vector3(0, size, 0) : new THREE.Vector3(0, 0, size);
+    const a = center.clone().project(camera);
+    const b = center.clone().add(direction).project(camera);
+    return new THREE.Vector2(b.x - a.x, b.y - a.y);
+  };
+
+  const getRulerRange = (axis: RulerAxis) => {
+    const box = getReferenceBox();
+    if (axis === "z") return expandRange(box.min.z, box.max.z, 0.08);
+    const gridRange = getVisibleGridRange();
+    if (axis === "x") return gridRange ? { min: gridRange.minX, max: gridRange.maxX } : expandRange(box.min.x, box.max.x, 0.12);
+    return gridRange ? { min: gridRange.minY, max: gridRange.maxY } : expandRange(box.min.y, box.max.y, 0.12);
+  };
+
+  const projectWorldToCanvas = (world: THREE.Vector3, camera: THREE.Camera, mount: HTMLDivElement) => {
+    const projected = world.clone().project(camera);
+    if (projected.z < -1 || projected.z > 1) return null;
+    return new THREE.Vector2(((projected.x + 1) / 2) * mount.clientWidth, ((1 - projected.y) / 2) * mount.clientHeight);
+  };
+
+  const intersectScreenLineWithRuler = (a: THREE.Vector2, b: THREE.Vector2, side: RulerSide, mount: HTMLDivElement, ruler: HTMLDivElement) => {
+    const canvasRect = mount.getBoundingClientRect();
+    const rulerRect = ruler.getBoundingClientRect();
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+
+    if (side === "bottom") {
+      if (Math.abs(dy) < 0.0001) return null;
+      const t = (mount.clientHeight - a.y) / dy;
+      const x = a.x + dx * t;
+      return canvasRect.left - rulerRect.left + x;
+    }
+
+    if (Math.abs(dx) < 0.0001) return null;
+    const edgeX = side === "left" ? 0 : mount.clientWidth;
+    const t = (edgeX - a.x) / dx;
+    const y = a.y + dy * t;
+    return canvasRect.top - rulerRect.top + y;
+  };
+
+  const getZAxisAnchor = (range: DynamicGridSignature) => {
+    const camera = activeCameraRef.current;
+    const mount = mountRef.current;
+    const box = getReferenceBox();
+    if (!camera || !mount) return box.getCenter(new THREE.Vector3());
+
+    const candidates = [
+      new THREE.Vector3(range.minX, range.minY, box.min.z),
+      new THREE.Vector3(range.maxX, range.minY, box.min.z),
+      new THREE.Vector3(range.minX, range.maxY, box.min.z),
+      new THREE.Vector3(range.maxX, range.maxY, box.min.z),
+      new THREE.Vector3(range.maxX, (range.minY + range.maxY) / 2, box.min.z),
+      new THREE.Vector3((range.minX + range.maxX) / 2, range.maxY, box.min.z),
+    ];
+
+    let best = candidates[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    candidates.forEach((candidate) => {
+      const screen = projectWorldToCanvas(candidate, camera, mount);
+      if (!screen) return;
+      const distance = Math.abs(mount.clientWidth - screen.x) + Math.abs(mount.clientHeight * 0.5 - screen.y) * 0.25;
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    });
+    return best;
+  };
+
+  const projectRulerTick = (side: RulerSide, axis: RulerAxis, value: number, gridRange: DynamicGridSignature | null) => {
+    const camera = activeCameraRef.current;
+    const mount = mountRef.current;
+    const ruler = rulerRefs.current[side];
+    if (!camera || !mount || !ruler) return null;
+
+    const box = getReferenceBox();
+    const gridZ = box.min.z;
+    const range = gridRange ?? getVisibleGridRange();
+    if (!range) return null;
+
+    if (axis === "x" || axis === "y") {
+      const a =
+        axis === "x"
+          ? new THREE.Vector3(value, range.minY, gridZ)
+          : new THREE.Vector3(range.minX, value, gridZ);
+      const b =
+        axis === "x"
+          ? new THREE.Vector3(value, range.maxY, gridZ)
+          : new THREE.Vector3(range.maxX, value, gridZ);
+      const screenA = projectWorldToCanvas(a, camera, mount);
+      const screenB = projectWorldToCanvas(b, camera, mount);
+      if (!screenA || !screenB) return null;
+      return intersectScreenLineWithRuler(screenA, screenB, side, mount, ruler);
+    }
+
+    const anchor = getZAxisAnchor(range);
+    const screenA = projectWorldToCanvas(new THREE.Vector3(anchor.x, anchor.y, box.min.z), camera, mount);
+    const screenB = projectWorldToCanvas(new THREE.Vector3(anchor.x, anchor.y, box.max.z), camera, mount);
+    if (!screenA || !screenB) return null;
+    const axisPos = intersectScreenLineWithRuler(screenA, screenB, side, mount, ruler);
+    if (axisPos === null) {
+      const tick = projectWorldToCanvas(new THREE.Vector3(anchor.x, anchor.y, value), camera, mount);
+      if (!tick) return null;
+      const rulerRect = ruler.getBoundingClientRect();
+      const canvasRect = mount.getBoundingClientRect();
+      return canvasRect.top - rulerRect.top + tick.y;
+    }
+    const ratio = (value - box.min.z) / Math.max(0.0001, box.max.z - box.min.z);
+    return screenA.y + (screenB.y - screenA.y) * ratio + mount.getBoundingClientRect().top - ruler.getBoundingClientRect().top;
+  };
+
+  const renderRuler = (side: RulerSide, axis: RulerAxis, range: { min: number; max: number }, gridRange: DynamicGridSignature | null) => {
+    const el = rulerRefs.current[side];
+    if (!el) return "";
+    const length = side === "bottom" ? el.clientWidth : el.clientHeight;
+    const step = chooseNiceStep(range.max - range.min, side === "right" ? 6 : 8);
+    const firstTick = Math.ceil(range.min / step) * step;
+    const ticks: string[] = [];
+    const signatureParts = [side, axis, range.min.toFixed(3), range.max.toFixed(3), step.toFixed(5), String(Math.round(length))];
+
+    for (let value = firstTick; value <= range.max + step * 0.5 && ticks.length < RULER_MAX_TICKS; value += step) {
+      const pos = projectRulerTick(side, axis, value, gridRange);
+      if (pos === null) continue;
+      if (pos < 18 || pos > length - 18) continue;
+      signatureParts.push(value.toFixed(5), pos.toFixed(1));
+      ticks.push(
+        `<span class="ruler-tick" style="${side === "bottom" ? `left:${pos}px` : `top:${pos}px`}"><i></i><b>${formatRulerValue(
+          value,
+          step,
+        )}</b></span>`,
+      );
+    }
+    const signature = signatureParts.join(":");
+    if (el.dataset.signature === signature) return signature;
+    el.dataset.axis = axis;
+    el.dataset.signature = signature;
+    el.innerHTML = `<span class="ruler-axis">${AXIS_LABELS[axis]}</span>${ticks.join("")}`;
+    return signature;
+  };
+
+  const updateCoordinateRulers = () => {
+    const visible = showGridRef.current;
+    (Object.keys(rulerRefs.current) as RulerSide[]).forEach((side) => {
+      const el = rulerRefs.current[side];
+      if (el) el.hidden = !visible;
+    });
+    if (!visible) return;
+
+    const xScreen = getScreenAxis("x");
+    const yScreen = getScreenAxis("y");
+    const bottomAxis: RulerAxis = Math.abs(xScreen.x) >= Math.abs(yScreen.x) ? "x" : "y";
+    const leftAxis: RulerAxis = bottomAxis === "x" ? "y" : "x";
+    const gridRange = getVisibleGridRange();
+    const parts = [
+      renderRuler("bottom", bottomAxis, getRulerRange(bottomAxis), gridRange),
+      renderRuler("left", leftAxis, getRulerRange(leftAxis), gridRange),
+      renderRuler("right", "z", getRulerRange("z"), gridRange),
+    ];
+    const signature = parts.join("|");
+    if (signature === rulerSignatureRef.current) return;
+    rulerSignatureRef.current = signature;
+  };
+
   useEffect(() => {
     edlEnabledRef.current = edlEnabled;
   }, [edlEnabled]);
@@ -822,11 +1152,6 @@ function App() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(viewportBgColor);
     scene.add(new THREE.AmbientLight(0xffffff, 1.4));
-    const grid = new THREE.GridHelper(20, 20, 0xebebeb, 0xf5f5f5);
-    grid.rotation.x = Math.PI / 2;
-    grid.visible = showGrid;
-    gridRef.current = grid;
-    scene.add(grid);
     const axes = new THREE.AxesHelper(2.5);
     axes.visible = showAxes;
     axesRef.current = axes;
@@ -914,6 +1239,9 @@ function App() {
         edlPassRef.current.setSize(width, height);
       }
 
+      gridSignatureRef.current = "";
+      rulerSignatureRef.current = "";
+
       annotationGroupRef.current.children.forEach((obj) => {
         const mat = (obj as Line2).material as LineMaterial;
         if (mat && "resolution" in mat) {
@@ -969,6 +1297,8 @@ function App() {
       animationId = requestAnimationFrame(animate);
       controlsRef.current?.update();
       updateGizmoFromCamera();
+      updateDynamicGrid();
+      updateCoordinateRulers();
       if (measurementsRef.current.length > 0) {
         setMeasurementLabelTick((tick) => tick + 1);
       }
@@ -987,6 +1317,10 @@ function App() {
       window.removeEventListener("resize", onResize);
       controls.dispose();
       edlPass.dispose();
+      if (gridRef.current) {
+        gridRef.current.geometry.dispose();
+        (gridRef.current.material as THREE.Material).dispose();
+      }
       renderer.dispose();
       mountRef.current?.removeChild(renderer.domElement);
     };
@@ -998,8 +1332,9 @@ function App() {
   }, [viewportBgColor]);
 
   useEffect(() => {
-    if (!gridRef.current) return;
-    gridRef.current.visible = showGrid;
+    showGridRef.current = showGrid;
+    if (gridRef.current) gridRef.current.visible = showGrid;
+    rulerSignatureRef.current = "";
   }, [showGrid]);
 
   useEffect(() => {
@@ -1619,6 +1954,8 @@ function App() {
 
     geometry.computeBoundingBox();
     if (geometry.boundingBox) {
+      gridSignatureRef.current = "";
+      rulerSignatureRef.current = "";
       const doFit = shouldFitView || !hasAutoFramedRef.current;
       if (doFit) {
         fitViewToBoundingBox(geometry.boundingBox.clone(), true);
@@ -2078,7 +2415,7 @@ function App() {
     <div className="app workbench">
       <header className="menu-bar">
         <div className="menu-left">
-          <p className="mono-label">POINT CLOUD STUDIO</p>
+          <p className="mono-label">CAGE-Viewer</p>
           <nav className="menu-items">
             <div className="menu-dropdown-wrap">
               <button className="menu-btn" type="button" onClick={() => setOpenMenu(openMenu === "file" ? null : "file")}>
@@ -2188,7 +2525,6 @@ function App() {
               Z
             </div>
           </div>
-          <div className="viewport-badge">3D 视口</div>
           <div
             ref={mountRef}
             className={`canvas-wrap ${measurementEnabled ? `measuring ${activeMeasurementTool ?? ""}` : ""} ${isMeasurementHandleHover || draggedMeasurementPoint ? "handle-hover" : ""}`}
@@ -2197,6 +2533,26 @@ function App() {
             onPointerUp={onMeasurementPointerUp}
             onPointerLeave={() => setIsMeasurementHandleHover(false)}
           />
+          <div className="coordinate-rulers" aria-hidden="true">
+            <div
+              className="coordinate-ruler ruler-left"
+              ref={(el) => {
+                rulerRefs.current.left = el;
+              }}
+            />
+            <div
+              className="coordinate-ruler ruler-bottom"
+              ref={(el) => {
+                rulerRefs.current.bottom = el;
+              }}
+            />
+            <div
+              className="coordinate-ruler ruler-right"
+              ref={(el) => {
+                rulerRefs.current.right = el;
+              }}
+            />
+          </div>
           {measurementEnabled && (
             <div className="measurement-toolbar" aria-label="测量工具栏">
               <button
