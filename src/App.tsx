@@ -4,26 +4,21 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { Line2 } from "three/examples/jsm/lines/Line2.js";
-import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
-import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
-import { Aperture, Compass, FolderOpen, ImageDown, LocateFixed, MousePointer2, Route, Ruler, Square } from "lucide-react";
+import type { Line2 } from "three/examples/jsm/lines/Line2.js";
+import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { Aperture, Compass, FolderOpen, ImageDown } from "lucide-react";
 import { EDLPass } from "./EDLPass";
 import { RightPanel } from "./components/panel/RightPanel";
+import { redrawAnnotationObjects } from "./features/annotation/annotationRenderer";
+import { MeasurementOverlay } from "./features/measurement/MeasurementOverlay";
+import { redrawMeasurementObjects } from "./features/measurement/measurementRenderer";
+import { applyCameraSnapshot, snapshotOrthographicCamera, snapshotPerspectiveCamera } from "./features/view-params/viewParams";
 import type { AnnotationData } from "./types/annotation";
 import type { DraggedMeasurementPoint, MeasurementAxis, MeasurementItem, MeasurementPoint, MeasurementTool, RectDraft, ScreenPoint } from "./types/measurement";
 import type { PanelFeatureId, PanelSectionId } from "./types/panel";
 import type { DynamicGridSignature, RulerAxis, RulerRefs, RulerSide } from "./types/ruler";
-import type { CameraMode, CameraSnapshot, ViewParamsSnapshot } from "./types/view";
-import { normalizeColor } from "./utils/color";
-import {
-  MEASUREMENT_AXIS_COLORS,
-  MEASUREMENT_AXIS_VECTORS,
-  getMeasurementCenter,
-  pointToVector,
-  summarizeMeasurement,
-  vectorToPoint,
-} from "./utils/measurement";
+import type { CameraMode, ViewParamsSnapshot } from "./types/view";
+import { MEASUREMENT_AXIS_VECTORS, getMeasurementCenter, pointToVector, vectorToPoint } from "./utils/measurement";
 import { AXIS_LABELS, RULER_MAX_TICKS, chooseNiceStep, expandRange, formatRulerValue } from "./utils/ruler";
 import "./App.css";
 
@@ -950,227 +945,31 @@ function App() {
   };
 
   const redrawMeasurements = () => {
-    const group = measurementGroupRef.current;
-    const disposeMeasurementObject = (object: THREE.Object3D) => {
-      object.traverse((child) => {
-        if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-          const material = child.material as THREE.Material | THREE.Material[];
-          if (Array.isArray(material)) {
-            material.forEach((item) => item.dispose());
-          } else {
-            material.dispose();
-          }
-        }
-      });
-    };
-
-    while (group.children.length) {
-      const child = group.children.pop();
-      if (!child) continue;
-      disposeMeasurementObject(child);
-    }
-
-    if (!measurementEnabled) return;
-
-    measurements.forEach((measurement) => {
-      const isSelected = selectedMeasurementId === measurement.id;
-      const color = isSelected ? 0xc7ff4a : 0x66b7ff;
-      const vertices = measurement.points.map(pointToVector);
-      const lineVertices = measurement.type === "rect" && vertices.length >= 4 ? [...vertices, vertices[0]] : vertices;
-      if (lineVertices.length >= 2) {
-        const geometry = new THREE.BufferGeometry().setFromPoints(lineVertices);
-        const material = new THREE.LineBasicMaterial({ color, depthTest: false });
-        const line = new THREE.Line(geometry, material);
-        line.renderOrder = 30;
-        group.add(line);
-      }
-
-      vertices.forEach((point) => {
-        const geometry = new THREE.SphereGeometry(isSelected ? 0.055 : 0.04, 12, 12);
-        const material = new THREE.MeshBasicMaterial({ color, depthTest: false });
-        const handle = new THREE.Mesh(geometry, material);
-        handle.position.copy(point);
-        handle.renderOrder = 31;
-        group.add(handle);
-      });
+    redrawMeasurementObjects({
+      activeDragAxis,
+      activeMeasurementTool,
+      draftMeasurementPoints,
+      draggedMeasurementPointId: draggedMeasurementPoint?.id,
+      draggedMeasurementPointIndex: draggedMeasurementPoint?.pointIndex,
+      group: measurementGroupRef.current,
+      measurementEnabled,
+      measurements,
+      selectedMeasurementId,
     });
-
-    if (draggedMeasurementPoint) {
-      const draggedMeasurement = measurements.find((measurement) => measurement.id === draggedMeasurementPoint.id);
-      const anchorPoint = draggedMeasurement?.points[draggedMeasurementPoint.pointIndex];
-      if (anchorPoint) {
-        const anchor = pointToVector(anchorPoint);
-        const length = 0.5;
-        const headLength = length * 0.22;
-        const headWidth = length * 0.09;
-
-        (Object.keys(MEASUREMENT_AXIS_VECTORS) as MeasurementAxis[]).forEach((axis) => {
-          const isActive = activeDragAxis === axis;
-          const arrow = new THREE.ArrowHelper(
-            MEASUREMENT_AXIS_VECTORS[axis],
-            anchor,
-            length,
-            isActive ? 0xc7ff4a : MEASUREMENT_AXIS_COLORS[axis],
-            isActive ? headLength * 1.25 : headLength,
-            isActive ? headWidth * 1.35 : headWidth,
-          );
-          arrow.traverse((child) => {
-            child.renderOrder = isActive ? 43 : 42;
-            if (child instanceof THREE.Line) {
-              child.material = new THREE.LineBasicMaterial({
-                color: isActive ? 0xc7ff4a : MEASUREMENT_AXIS_COLORS[axis],
-                depthTest: false,
-                transparent: true,
-                opacity: isActive ? 1 : 0.78,
-              });
-            }
-            if (child instanceof THREE.Mesh) {
-              child.material = new THREE.MeshBasicMaterial({
-                color: isActive ? 0xc7ff4a : MEASUREMENT_AXIS_COLORS[axis],
-                depthTest: false,
-                transparent: true,
-                opacity: isActive ? 1 : 0.86,
-              });
-            }
-          });
-          group.add(arrow);
-        });
-      }
-    }
-
-    if ((activeMeasurementTool === "polyline" || activeMeasurementTool === "angle") && draftMeasurementPoints.length > 0) {
-      const vertices = draftMeasurementPoints.map(pointToVector);
-      if (vertices.length >= 2) {
-        const geometry = new THREE.BufferGeometry().setFromPoints(vertices);
-        const material = new THREE.LineBasicMaterial({ color: 0xc7ff4a, depthTest: false, transparent: true, opacity: 0.75 });
-        const line = new THREE.Line(geometry, material);
-        line.renderOrder = 32;
-        group.add(line);
-      }
-
-      vertices.forEach((point) => {
-        const geometry = new THREE.SphereGeometry(0.045, 12, 12);
-        const material = new THREE.MeshBasicMaterial({ color: 0xc7ff4a, depthTest: false });
-        const handle = new THREE.Mesh(geometry, material);
-        handle.position.copy(point);
-        handle.renderOrder = 33;
-        group.add(handle);
-      });
-    }
   };
 
   const redrawAnnotations = () => {
-    const group = annotationGroupRef.current;
-    while (group.children.length) {
-      const child = group.children.pop();
-      if (!child) continue;
-      const line = child as THREE.Line;
-      line.geometry?.dispose();
-      (line.material as THREE.Material)?.dispose();
-    }
-
-    const data = annotationDataRef.current;
-    if (!data) return;
-
-    const wallMin = zRangeRef.current.min;
-    const wallMax = zRangeRef.current.max;
-
-    const addLine = (pts: Array<[number, number, number]>, colorHex: string, closed = false) => {
-      if (pts.length < 2) return;
-      const linePoints = [...pts];
-      if (closed) linePoints.push(pts[0]);
-
-      const positions = linePoints.flatMap(([x, y, z]) => [x, y, z]);
-      const geometry = new LineGeometry();
-      geometry.setPositions(positions);
-
-      const width = mountRef.current?.clientWidth ?? 1200;
-      const height = mountRef.current?.clientHeight ?? 800;
-      const material = new LineMaterial({
-        color: normalizeColor(colorHex),
-        linewidth: annotationLineWidth,
-        worldUnits: false,
-      });
-      material.resolution.set(width, height);
-
-      const line = new Line2(geometry, material);
-      line.computeLineDistances();
-      group.add(line);
-    };
-
-    const to2DPoints = (coords: number[] | number[][]): Array<[number, number]> => {
-      if (Array.isArray(coords[0])) {
-        return (coords as number[][]).map(([x, y]) => [x, y]);
-      }
-      const flat = coords as number[];
-      const result: Array<[number, number]> = [];
-      for (let i = 0; i < flat.length; i += 2) {
-        result.push([flat[i], flat[i + 1]]);
-      }
-      return result;
-    };
-
-    const to3DPoints = (quad: number[] | number[][]): Array<[number, number, number]> => {
-      if (Array.isArray(quad[0])) {
-        return (quad as number[][]).map(([x, y, z]) => [x, y, z]);
-      }
-      const flat = quad as number[];
-      const result: Array<[number, number, number]> = [];
-      for (let i = 0; i < flat.length; i += 3) {
-        result.push([flat[i], flat[i + 1], flat[i + 2]]);
-      }
-      return result;
-    };
-
-    const floorPlan = data.floor_plan ?? {};
-    Object.values(floorPlan).forEach((coords) => {
-      const roomPts = to2DPoints(coords);
-      const floorPts = roomPts.map(([x, y]) => [x, y, wallMin] as [number, number, number]);
-      addLine(floorPts, roomColor, true);
-
-      for (let i = 0; i < roomPts.length; i++) {
-        const [x1, y1] = roomPts[i];
-        const [x2, y2] = roomPts[(i + 1) % roomPts.length];
-        addLine(
-          [
-            [x1, y1, wallMin],
-            [x2, y2, wallMin],
-          ],
-          roomColor,
-        );
-        addLine(
-          [
-            [x1, y1, wallMax],
-            [x2, y2, wallMax],
-          ],
-          roomColor,
-        );
-        addLine(
-          [
-            [x1, y1, wallMin],
-            [x1, y1, wallMax],
-          ],
-          roomColor,
-        );
-        addLine(
-          [
-            [x2, y2, wallMin],
-            [x2, y2, wallMax],
-          ],
-          roomColor,
-        );
-      }
-    });
-
-    const windows = data.door_window?.windows ?? {};
-    Object.values(windows).forEach((list) => {
-      list.forEach((quad) => addLine(to3DPoints(quad), windowColor, true));
-    });
-
-    const doors = data.door_window?.doors ?? {};
-    Object.values(doors).forEach((list) => {
-      list.forEach((quad) => addLine(to3DPoints(quad), doorColor, true));
+    redrawAnnotationObjects({
+      annotationLineWidth,
+      data: annotationDataRef.current,
+      doorColor,
+      group: annotationGroupRef.current,
+      height: mountRef.current?.clientHeight ?? 800,
+      roomColor,
+      wallMax: zRangeRef.current.max,
+      wallMin: zRangeRef.current.min,
+      width: mountRef.current?.clientWidth ?? 1200,
+      windowColor,
     });
   };
 
@@ -1324,30 +1123,6 @@ function App() {
     });
   };
 
-  const snapshotPerspective = (cam: THREE.PerspectiveCamera): CameraSnapshot => ({
-    position: [cam.position.x, cam.position.y, cam.position.z],
-    quaternion: [cam.quaternion.x, cam.quaternion.y, cam.quaternion.z, cam.quaternion.w],
-    up: [cam.up.x, cam.up.y, cam.up.z],
-    near: cam.near,
-    far: cam.far,
-    zoom: cam.zoom,
-    fov: cam.fov,
-    aspect: cam.aspect,
-  });
-
-  const snapshotOrthographic = (cam: THREE.OrthographicCamera): CameraSnapshot => ({
-    position: [cam.position.x, cam.position.y, cam.position.z],
-    quaternion: [cam.quaternion.x, cam.quaternion.y, cam.quaternion.z, cam.quaternion.w],
-    up: [cam.up.x, cam.up.y, cam.up.z],
-    near: cam.near,
-    far: cam.far,
-    zoom: cam.zoom,
-    left: cam.left,
-    right: cam.right,
-    top: cam.top,
-    bottom: cam.bottom,
-  });
-
   const onExportViewParams = () => {
     if (!perspectiveCameraRef.current || !orthographicCameraRef.current || !controlsRef.current) {
       return;
@@ -1357,8 +1132,8 @@ function App() {
       version: 1,
       cameraMode,
       controlsTarget: [controlsRef.current.target.x, controlsRef.current.target.y, controlsRef.current.target.z],
-      perspective: snapshotPerspective(perspectiveCameraRef.current),
-      orthographic: snapshotOrthographic(orthographicCameraRef.current),
+      perspective: snapshotPerspectiveCamera(perspectiveCameraRef.current),
+      orthographic: snapshotOrthographicCamera(orthographicCameraRef.current),
       viewportBgColor,
       showGrid,
       showAxes,
@@ -1371,34 +1146,6 @@ function App() {
     a.download = `view-params-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  };
-
-  const applyCameraSnapshot = (cam: THREE.Camera, snap: CameraSnapshot) => {
-    cam.position.set(...snap.position);
-    cam.quaternion.set(...snap.quaternion);
-    cam.up.set(...snap.up);
-
-    if ((cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
-      const p = cam as THREE.PerspectiveCamera;
-      p.near = snap.near;
-      p.far = snap.far;
-      p.zoom = snap.zoom;
-      if (typeof snap.fov === "number") p.fov = snap.fov;
-      if (typeof snap.aspect === "number") p.aspect = snap.aspect;
-      p.updateProjectionMatrix();
-    }
-
-    if ((cam as THREE.OrthographicCamera).isOrthographicCamera) {
-      const o = cam as THREE.OrthographicCamera;
-      o.near = snap.near;
-      o.far = snap.far;
-      o.zoom = snap.zoom;
-      if (typeof snap.left === "number") o.left = snap.left;
-      if (typeof snap.right === "number") o.right = snap.right;
-      if (typeof snap.top === "number") o.top = snap.top;
-      if (typeof snap.bottom === "number") o.bottom = snap.bottom;
-      o.updateProjectionMatrix();
-    }
   };
 
   const applyViewParams = (payload: ViewParamsSnapshot) => {
@@ -1827,105 +1574,22 @@ function App() {
               }}
             />
           </div>
-          {measurementEnabled && (
-            <div className="measurement-toolbar" aria-label="测量工具栏">
-              <button
-                className={`measurement-toolbar-btn ${activeMeasurementTool === "select" ? "active" : ""}`}
-                onClick={() => setActiveMeasurementTool("select")}
-                title="选择/旋转"
-                type="button"
-              >
-                <MousePointer2 size={16} />
-                <small>选择</small>
-              </button>
-              <button
-                className={`measurement-toolbar-btn ${activeMeasurementTool === "rect" ? "active" : ""}`}
-                onClick={() => setActiveMeasurementTool("rect")}
-                title="矩形区域测量"
-                type="button"
-              >
-                <Square size={16} />
-                <small>矩形</small>
-              </button>
-              <button
-                className={`measurement-toolbar-btn ${activeMeasurementTool === "line" ? "active" : ""}`}
-                onClick={() => setActiveMeasurementTool("line")}
-                title="线段距离"
-                type="button"
-              >
-                <Ruler size={16} />
-                <small>线段</small>
-              </button>
-              <button
-                className={`measurement-toolbar-btn ${activeMeasurementTool === "polyline" ? "active" : ""}`}
-                onClick={() => setActiveMeasurementTool("polyline")}
-                title="折线距离：连续点击取点，双击或按 Enter 完成"
-                type="button"
-              >
-                <Route size={16} />
-                <small>折线</small>
-              </button>
-              <button
-                className={`measurement-toolbar-btn ${activeMeasurementTool === "angle" ? "active" : ""}`}
-                onClick={() => setActiveMeasurementTool("angle")}
-                title="角度测量：依次选择端点、顶点、端点"
-                type="button"
-              >
-                <LocateFixed size={16} />
-                <small>角度</small>
-              </button>
-            </div>
-          )}
-          {measurementEnabled && rectDraft && (
-            <div
-              className="measurement-selection"
-              style={{
-                left: Math.min(rectDraft.start.x, rectDraft.current.x),
-                top: Math.min(rectDraft.start.y, rectDraft.current.y),
-                width: Math.abs(rectDraft.current.x - rectDraft.start.x),
-                height: Math.abs(rectDraft.current.y - rectDraft.start.y),
-              }}
-            />
-          )}
-          {measurementEnabled && pendingLinePoint && projectPointToScreen(pendingLinePoint) && (
-            <div
-              className="measurement-pending-dot"
-              style={{
-                left: projectPointToScreen(pendingLinePoint)!.x,
-                top: projectPointToScreen(pendingLinePoint)!.y,
-              }}
-            />
-          )}
-          {measurementEnabled && draftMeasurementPoints.map((point, index) => {
-            const screen = projectPointToScreen(point);
-            if (!screen) return null;
-            return (
-              <div
-                className="measurement-pending-dot"
-                key={`draft-${index}`}
-                style={{
-                  left: screen.x,
-                  top: screen.y,
-                }}
-              />
-            );
-          })}
-          {measurementOverlayItems.map(({ measurement, point }) => (
-            <button
-              className={`measurement-label ${selectedMeasurementId === measurement.id ? "active" : ""}`}
-              key={measurement.id}
-              onClick={() => {
-                setSelectedMeasurementId(measurement.id);
-                setActivePanelFeature("measurement");
-                openPanelSection("measurementDetails");
-              }}
-              style={{ left: point.x, top: point.y }}
-              type="button"
-            >
-              <span>{measurement.label}</span>
-              <strong>{summarizeMeasurement(measurement)}</strong>
-            </button>
-          ))}
+          <MeasurementOverlay
+            activeTool={activeMeasurementTool}
+            draftPoints={draftMeasurementPoints}
+            enabled={measurementEnabled}
+            items={measurementOverlayItems}
+            pendingLinePoint={pendingLinePoint}
+            projectPointToScreen={projectPointToScreen}
+            rectDraft={rectDraft}
+            selectedMeasurementId={selectedMeasurementId}
+            onSelectMeasurement={(measurementId) => {
+              setSelectedMeasurementId(measurementId);
+              setActivePanelFeature("measurement");
+              openPanelSection("measurementDetails");
+            }}
+            onSelectTool={setActiveMeasurementTool}
+          />
         </section>
 
         <RightPanel
