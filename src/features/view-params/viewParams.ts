@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import type { CameraSnapshot } from "../../types/view";
+import type { MutableRefObject } from "react";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { EDLPass } from "../../EDLPass";
+import type { CameraMode, CameraSnapshot, ViewParamsSnapshot } from "../../types/view";
 
 export const snapshotPerspectiveCamera = (cam: THREE.PerspectiveCamera): CameraSnapshot => ({
   position: [cam.position.x, cam.position.y, cam.position.z],
@@ -51,4 +55,85 @@ export const applyCameraSnapshot = (cam: THREE.Camera, snap: CameraSnapshot) => 
     if (typeof snap.bottom === "number") o.bottom = snap.bottom;
     o.updateProjectionMatrix();
   }
+};
+
+type BuildViewParamsSnapshotParams = {
+  cameraMode: CameraMode;
+  controls: OrbitControls | null;
+  orthographicCamera: THREE.OrthographicCamera | null;
+  perspectiveCamera: THREE.PerspectiveCamera | null;
+  showAxes: boolean;
+  showGrid: boolean;
+  viewportBgColor: string;
+};
+
+export const buildViewParamsSnapshot = ({
+  cameraMode,
+  controls,
+  orthographicCamera,
+  perspectiveCamera,
+  showAxes,
+  showGrid,
+  viewportBgColor,
+}: BuildViewParamsSnapshotParams): ViewParamsSnapshot | null => {
+  if (!perspectiveCamera || !orthographicCamera || !controls) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    cameraMode,
+    controlsTarget: [controls.target.x, controls.target.y, controls.target.z],
+    perspective: snapshotPerspectiveCamera(perspectiveCamera),
+    orthographic: snapshotOrthographicCamera(orthographicCamera),
+    viewportBgColor,
+    showGrid,
+    showAxes,
+  };
+};
+
+type ApplyViewParamsToViewportParams = {
+  activeCameraRef: MutableRefObject<THREE.Camera | null>;
+  controls: OrbitControls | null;
+  edlPass: EDLPass | null;
+  orthographicCamera: THREE.OrthographicCamera | null;
+  payload: ViewParamsSnapshot;
+  perspectiveCamera: THREE.PerspectiveCamera | null;
+  renderPass: RenderPass | null;
+  setCameraMode: (value: CameraMode) => void;
+  setShowAxes: (value: boolean) => void;
+  setShowGrid: (value: boolean) => void;
+  setViewportBgColor: (value: string) => void;
+};
+
+export const applyViewParamsToViewport = ({
+  activeCameraRef,
+  controls,
+  edlPass,
+  orthographicCamera,
+  payload,
+  perspectiveCamera,
+  renderPass,
+  setCameraMode,
+  setShowAxes,
+  setShowGrid,
+  setViewportBgColor,
+}: ApplyViewParamsToViewportParams) => {
+  if (!perspectiveCamera || !orthographicCamera || !controls) return;
+
+  applyCameraSnapshot(perspectiveCamera, payload.perspective);
+  applyCameraSnapshot(orthographicCamera, payload.orthographic);
+
+  setViewportBgColor(payload.viewportBgColor ?? "#08090a");
+  setShowGrid(Boolean(payload.showGrid));
+  setShowAxes(Boolean(payload.showAxes));
+  setCameraMode(payload.cameraMode);
+
+  controls.target.set(...payload.controlsTarget);
+  const nextCamera = payload.cameraMode === "perspective" ? perspectiveCamera : orthographicCamera;
+  controls.object = nextCamera;
+  activeCameraRef.current = nextCamera;
+  if (renderPass) renderPass.camera = nextCamera;
+  edlPass?.setCamera(nextCamera);
+  controls.update();
 };
