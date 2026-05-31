@@ -1,7 +1,6 @@
 import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import type { Line2 } from "three/examples/jsm/lines/Line2.js";
@@ -12,12 +11,14 @@ import { RightPanel } from "./components/panel/RightPanel";
 import { redrawAnnotationObjects } from "./features/annotation/annotationRenderer";
 import { MeasurementOverlay } from "./features/measurement/MeasurementOverlay";
 import { redrawMeasurementObjects } from "./features/measurement/measurementRenderer";
+import { createFilteredPointCloud, disposePointCloud, parsePlyPointCloud } from "./features/point-cloud/pointCloud";
 import { applyCameraSnapshot, snapshotOrthographicCamera, snapshotPerspectiveCamera } from "./features/view-params/viewParams";
 import type { AnnotationData } from "./types/annotation";
 import type { DraggedMeasurementPoint, MeasurementAxis, MeasurementItem, MeasurementPoint, MeasurementTool, RectDraft, ScreenPoint } from "./types/measurement";
 import type { PanelFeatureId, PanelSectionId } from "./types/panel";
 import type { DynamicGridSignature, RulerAxis, RulerRefs, RulerSide } from "./types/ruler";
 import type { CameraMode, ViewParamsSnapshot } from "./types/view";
+import { downloadBlob, downloadJson, readFileAsArrayBuffer, readFileAsText } from "./utils/file";
 import { MEASUREMENT_AXIS_VECTORS, getMeasurementCenter, pointToVector, vectorToPoint } from "./utils/measurement";
 import { AXIS_LABELS, RULER_MAX_TICKS, chooseNiceStep, expandRange, formatRulerValue } from "./utils/ruler";
 import "./App.css";
@@ -985,128 +986,70 @@ function App() {
 
     if (pointCloudRef.current) {
       scene.remove(pointCloudRef.current);
-      pointCloudRef.current.geometry.dispose();
-      (pointCloudRef.current.material as THREE.Material).dispose();
+      disposePointCloud(pointCloudRef.current);
       pointCloudRef.current = null;
     }
 
     const positions = originalPositionsRef.current;
     const colors = originalColorsRef.current;
-    const { min, max } = zRangeRef.current;
-    const threshold = max - (zThresholdRatio / 100) * (max - min);
-
-    const nextPos: number[] = [];
-    const nextCol: number[] = [];
-
-    for (let i = 0; i < positions.length; i += 3) {
-      const z = positions[i + 2];
-      if (z <= threshold) {
-        nextPos.push(positions[i], positions[i + 1], z);
-        if (colors) {
-          nextCol.push(colors[i], colors[i + 1], colors[i + 2]);
-        }
-      }
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(nextPos, 3));
-    if (colors && nextCol.length > 0) {
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(nextCol, 3));
-    }
-
-    const material = new THREE.PointsMaterial({
-      size: pointSize,
-      sizeAttenuation: false,
-      vertexColors: Boolean(colors),
-      color: colors ? "#ffffff" : "#a8a8a8",
+    const points = createFilteredPointCloud({
+      colors,
+      pointSize,
+      positions,
+      zRange: zRangeRef.current,
+      zThresholdRatio,
     });
-
-    const points = new THREE.Points(geometry, material);
     pointCloudRef.current = points;
     scene.add(points);
 
-    geometry.computeBoundingBox();
-    if (geometry.boundingBox) {
+    if (points.geometry.boundingBox) {
       gridSignatureRef.current = "";
       rulerSignatureRef.current = "";
       const doFit = shouldFitView || !hasAutoFramedRef.current;
       if (doFit) {
-        fitViewToBoundingBox(geometry.boundingBox.clone(), true);
+        fitViewToBoundingBox(points.geometry.boundingBox.clone(), true);
         hasAutoFramedRef.current = true;
       } else {
-        boundingBoxRef.current = geometry.boundingBox.clone();
+        boundingBoxRef.current = points.geometry.boundingBox.clone();
       }
     }
     redrawAnnotations();
   };
 
-  const onLoadPly = (e: ChangeEvent<HTMLInputElement>) => {
+  const onLoadPly = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setPlyFileName(file.name);
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const loader = new PLYLoader();
-        const geometry = loader.parse(reader.result as ArrayBuffer);
-        geometry.computeVertexNormals();
-
-        const posAttr = geometry.getAttribute("position") as THREE.BufferAttribute;
-        const colAttr = geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
-
-        const positions = new Float32Array(posAttr.array as ArrayLike<number>);
-        let colors: Float32Array | null = null;
-        if (colAttr) {
-          colors = new Float32Array(colAttr.array as ArrayLike<number>);
-          let maxVal = 0;
-          for (let i = 0; i < colors.length; i++) maxVal = Math.max(maxVal, colors[i]);
-          if (maxVal > 1) {
-            for (let i = 0; i < colors.length; i++) colors[i] /= 255;
-          }
-        }
-
-        let zMin = Number.POSITIVE_INFINITY;
-        let zMax = Number.NEGATIVE_INFINITY;
-        for (let i = 2; i < positions.length; i += 3) {
-          zMin = Math.min(zMin, positions[i]);
-          zMax = Math.max(zMax, positions[i]);
-        }
-
-        originalPositionsRef.current = positions;
-        originalColorsRef.current = colors;
-        zRangeRef.current = {
-          min: Number.isFinite(zMin) ? zMin : 0,
-          max: Number.isFinite(zMax) ? zMax : 1,
-        };
-        rebuildPointCloud(true);
-      } catch (error) {
-        console.error("PLY 解析失败:", error);
-        alert("PLY 文件解析失败，请检查文件格式。");
-      }
-    };
-    reader.readAsArrayBuffer(file);
-    e.target.value = "";
+    try {
+      const pointCloud = parsePlyPointCloud(await readFileAsArrayBuffer(file));
+      originalPositionsRef.current = pointCloud.positions;
+      originalColorsRef.current = pointCloud.colors;
+      zRangeRef.current = pointCloud.zRange;
+      rebuildPointCloud(true);
+    } catch (error) {
+      console.error("PLY 解析失败:", error);
+      alert("PLY 文件解析失败，请检查文件格式。");
+    } finally {
+      e.target.value = "";
+    }
   };
 
-  const onLoadAnnotation = (e: ChangeEvent<HTMLInputElement>) => {
+  const onLoadAnnotation = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setAnnotationFileName(file.name);
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string) as AnnotationData;
-        annotationDataRef.current = parsed;
-        redrawAnnotations();
-      } catch (error) {
-        console.error("标注解析失败:", error);
-        alert("JSON 标注解析失败，请检查格式。");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
+    try {
+      const parsed = JSON.parse(await readFileAsText(file)) as AnnotationData;
+      annotationDataRef.current = parsed;
+      redrawAnnotations();
+    } catch (error) {
+      console.error("标注解析失败:", error);
+      alert("JSON 标注解析失败，请检查格式。");
+    } finally {
+      e.target.value = "";
+    }
   };
 
   const onSaveSnapshot = () => {
@@ -1114,12 +1057,7 @@ function App() {
     if (!renderer) return;
     renderer.domElement.toBlob((blob: Blob | null) => {
       if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `snapshot-${Date.now()}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `snapshot-${Date.now()}.png`);
     });
   };
 
@@ -1139,13 +1077,7 @@ function App() {
       showAxes,
     };
 
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `view-params-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadJson(payload, `view-params-${Date.now()}.json`);
   };
 
   const applyViewParams = (payload: ViewParamsSnapshot) => {
@@ -1171,23 +1103,20 @@ function App() {
     controls.update();
   };
 
-  const onLoadViewParams = (e: ChangeEvent<HTMLInputElement>) => {
+  const onLoadViewParams = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string) as ViewParamsSnapshot;
-        if (parsed.version !== 1) throw new Error("不支持的参数版本");
-        applyViewParams(parsed);
-      } catch (err) {
-        console.error("导入3D参数失败:", err);
-        alert("导入3D参数失败，请检查 JSON 格式。");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
+    try {
+      const parsed = JSON.parse(await readFileAsText(file)) as ViewParamsSnapshot;
+      if (parsed.version !== 1) throw new Error("不支持的参数版本");
+      applyViewParams(parsed);
+    } catch (err) {
+      console.error("导入3D参数失败:", err);
+      alert("导入3D参数失败，请检查 JSON 格式。");
+    } finally {
+      e.target.value = "";
+    }
   };
 
   useEffect(() => {
